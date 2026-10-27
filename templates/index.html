@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bulk Email Verifier</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1c2230; --muted:#667085; --line:#e4e7ec; --brand:#2f5bea;
+          --valid:#12805c; --invalid:#c0392b; --risky:#b7791f; --unknown:#667085; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12151b; --card:#1b2029; --ink:#e8ebf2; --muted:#9aa3b5; --line:#2a3140; --brand:#6d8cff;
+            --valid:#3ecf9a; --invalid:#ff7a6b; --risky:#f2b84b; --unknown:#9aa3b5; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif; }
+  main { max-width:880px; margin:0 auto; padding:32px 16px 64px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  p.sub { color:var(--muted); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:16px; }
+  textarea { width:100%; min-height:90px; border:1px solid var(--line); border-radius:8px; padding:10px;
+             background:transparent; color:var(--ink); font:inherit; resize:vertical; }
+  input[type=file] { margin-bottom:12px; }
+  button, a.btn { background:var(--brand); color:#fff; border:0; border-radius:8px; padding:10px 18px;
+                  font:inherit; cursor:pointer; text-decoration:none; display:inline-block; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  a.btn.alt { background:transparent; color:var(--brand); border:1px solid var(--brand); }
+  .bar { height:12px; background:var(--line); border-radius:6px; overflow:hidden; margin:12px 0; }
+  .bar > div { height:100%; width:0; background:var(--brand); transition:width .3s; }
+  .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+  .stat { border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+  .stat b { display:block; font-size:22px; }
+  .stat span { color:var(--muted); font-size:13px; }
+  .valid b{color:var(--valid)} .invalid b{color:var(--invalid)} .risky b{color:var(--risky)} .unknown b{color:var(--unknown)}
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  .warn { background:rgba(183,121,31,.12); border:1px solid var(--risky); border-radius:8px; padding:10px 12px; margin-top:12px; }
+  .hidden { display:none; }
+  .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:14px; }
+  @media (max-width:560px){ .stats{grid-template-columns:repeat(2,1fr);} }
+</style>
+</head>
+<body>
+<main>
+  <h1>Bulk Email Verifier</h1>
+  <p class="sub">Check up to {{ max_emails }} addresses for bounces: syntax, domain, MX, catch-all and SMTP ping.</p>
+
+  <section class="card">
+    <input type="file" id="file" accept=".csv,.xlsx,.xlsm"><br>
+    <label for="emails" style="color:var(--muted)">…or paste emails (one per line)</label>
+    <textarea id="emails" placeholder="jane@example.com&#10;sam@company.org"></textarea>
+    <div class="actions"><button id="go">Start verification</button></div>
+    <div id="err" class="warn hidden"></div>
+  </section>
+
+  <section class="card hidden" id="progressCard">
+    <div><b id="pct">0%</b> <span id="count" style="color:var(--muted)"></span></div>
+    <div class="bar"><div id="fill"></div></div>
+    <div class="stats">
+      <div class="stat valid"><b id="c_valid">0</b><span>Valid</span></div>
+      <div class="stat invalid"><b id="c_invalid">0</b><span>Invalid</span></div>
+      <div class="stat risky"><b id="c_risky">0</b><span>Risky (catch-all)</span></div>
+      <div class="stat unknown"><b id="c_unknown">0</b><span>Unknown</span></div>
+    </div>
+    <div id="smtpWarn" class="warn hidden">Port 25 is blocked on this network, so the SMTP ping and catch-all checks were skipped. Addresses that pass syntax, domain and MX show as <b>Unknown</b>. Run this on a server/VPS that allows outbound port 25 for full accuracy.</div>
+    <div class="actions hidden" id="downloads">
+      <a class="btn" id="dl_all">Download all (CSV)</a>
+      <a class="btn alt" id="dl_valid">Valid only</a>
+      <a class="btn alt" id="dl_invalid">Invalid only</a>
+      <a class="btn alt" id="dl_risky">Risky only</a>
+    </div>
+  </section>
+
+  <section class="card hidden" id="recentCard">
+    <b>Latest results</b>
+    <table><thead><tr><th>Email</th><th>Status</th><th>Reason</th></tr></thead><tbody id="recent"></tbody></table>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let timer = null;
+function showErr(m){ $('err').textContent = m; $('err').classList.remove('hidden'); }
+
+$('go').onclick = async () => {
+  $('err').classList.add('hidden');
+  const fd = new FormData();
+  const f = $('file').files[0];
+  if (f) fd.append('file', f); else fd.append('emails', $('emails').value);
+  $('go').disabled = true;
+  const r = await fetch('/api/upload', {method:'POST', body:fd});
+  const j = await r.json();
+  if (!r.ok) { showErr(j.error || 'Upload failed'); $('go').disabled = false; return; }
+  if (j.truncated) showErr('Only the first {{ max_emails }} emails were processed.');
+  ['progressCard','recentCard'].forEach(i => $(i).classList.remove('hidden'));
+  $('downloads').classList.add('hidden');
+  poll(j.job_id);
+};
+
+function poll(id){
+  clearInterval(timer);
+  timer = setInterval(async () => {
+    const j = await (await fetch('/api/progress/' + id)).json();
+    const pct = j.total ? Math.round(100 * j.done / j.total) : 0;
+    $('pct').textContent = pct + '%';
+    $('fill').style.width = pct + '%';
+    $('count').textContent = `${j.done} / ${j.total}` + (j.eta != null && j.state === 'running' ? ` · ~${j.eta}s left` : '');
+    for (const k of ['valid','invalid','risky','unknown']) $('c_' + k).textContent = j.counts[k];
+    if (j.smtp_available === false) $('smtpWarn').classList.remove('hidden');
+    const tb = $('recent'); tb.innerHTML = '';
+    j.recent.slice().reverse().forEach(r => {
+      const tr = document.createElement('tr');
+      [r.email, r.status, r.reason].forEach((t, i) => {
+        const td = document.createElement('td'); td.textContent = t; tr.appendChild(td);
+      });
+      tb.appendChild(tr);
+    });
+    if (j.state === 'finished') {
+      clearInterval(timer);
+      $('go').disabled = false;
+      $('downloads').classList.remove('hidden');
+      $('dl_all').href = '/api/download/' + id;
+      for (const k of ['valid','invalid','risky']) $('dl_' + k).href = `/api/download/${id}?only=${k}`;
+    }
+  }, 1000);
+}
+</script>
+</body>
+</html>
